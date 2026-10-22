@@ -690,7 +690,7 @@ func TestRetry(t *testing.T) {
 
 	t.Run("idempotent request", func(t *testing.T) {
 		p, api := newTestProvider(t)
-		api.failures = []int{http.StatusServiceUnavailable, http.StatusBadGateway}
+		api.failures = []int{http.StatusInternalServerError, 520}
 		if _, err := p.GetRecords(ctx, testZone); err != nil {
 			t.Fatal(err)
 		}

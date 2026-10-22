@@ -146,10 +146,10 @@ func retryable(method string, err error) bool {
 		// transport error
 		return method != http.MethodPost
 	}
-	switch apiErr.statusCode {
-	case http.StatusTooManyRequests:
+	switch {
+	case apiErr.statusCode == http.StatusTooManyRequests:
 		return true
-	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case apiErr.statusCode >= 500:
 		return method != http.MethodPost
 	}
 	return false
