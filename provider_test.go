@@ -32,6 +32,7 @@ type fakeAPI struct {
 	failures []int    // HTTP statuses to respond with before handling requests
 	failOn   string   // if set, failures apply only to requests with this method
 	sets     []rrset  // record sets of the zone
+	reads    []string // paths of handled record list requests
 	writes   []string // "METHOD path" of handled write requests
 }
 
@@ -43,6 +44,7 @@ func newTestProvider(t *testing.T, sets ...rrset) (*Provider, *fakeAPI) {
 	mux.HandleFunc("POST /service/account/create/token", api.createToken)
 	mux.HandleFunc("GET /dns/orders", api.auth(api.listOrders))
 	mux.HandleFunc("GET /dns/orders/{id}/records", api.auth(api.listRecords))
+	mux.HandleFunc("GET /dns/orders/{id}/records/{type}", api.auth(api.listRecords))
 	mux.HandleFunc("POST /dns/orders/{id}/records/{type}", api.auth(api.createRRset))
 	mux.HandleFunc("PATCH /dns/orders/{id}/records/{type}/{name}", api.auth(api.updateRRset))
 	mux.HandleFunc("DELETE /dns/orders/{id}/records/{type}/{name}", api.auth(api.deleteRRset))
@@ -118,7 +120,14 @@ func (api *fakeAPI) listOrders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *fakeAPI) listRecords(w http.ResponseWriter, r *http.Request) {
-	respond(w, http.StatusOK, map[string]any{"records": api.sets})
+	api.reads = append(api.reads, r.URL.Path)
+	sets := []rrset{}
+	for _, set := range api.sets {
+		if typ := r.PathValue("type"); typ == "" || strings.EqualFold(set.Type, typ) {
+			sets = append(sets, set)
+		}
+	}
+	respond(w, http.StatusOK, map[string]any{"records": sets})
 }
 
 func (api *fakeAPI) find(name, typ string) int {
@@ -465,6 +474,9 @@ func TestDeleteRecords(t *testing.T) {
 	ctx := context.Background()
 	seed := func() []rrset {
 		return []rrset{
+			{Name: "example.com.", Type: "SOA", TTL: 3600, Records: []record{
+				{Content: "ns1.example.com. hostmaster.example.com. 1 7200 3600 1209600 600"},
+			}},
 			txtSet("_acme-challenge.example.com.", 600, "token1", "token2"),
 			{Name: "_acme-challenge.example.com.", Type: "CNAME", TTL: 600, Records: []record{{Content: "x.example.com."}}},
 			{Name: "www.example.com.", Type: "A", TTL: 900, Records: []record{{Content: "192.0.2.1"}}},
@@ -529,6 +541,11 @@ func TestDeleteRecords(t *testing.T) {
 			},
 		},
 		{
+			// The API can't write SOA records, so they can't be deleted.
+			name:  "type that can't be written",
+			input: []libdns.Record{libdns.RR{Name: "@", Type: "SOA"}},
+		},
+		{
 			name: "no match",
 			input: []libdns.Record{
 				libdns.TXT{Name: "_acme-challenge", Text: "token3"},
@@ -559,6 +576,59 @@ func TestListZones(t *testing.T) {
 	want := []libdns.Zone{{Name: "example.com."}, {Name: "example.net."}}
 	if !slices.Equal(zones, want) {
 		t.Errorf("zones = %v, want %v", zones, want)
+	}
+}
+
+// TestListedTypes checks that writes list only the record types they change,
+// so that keys with permissions for these types only are sufficient.
+func TestListedTypes(t *testing.T) {
+	const records = "/dns/orders/" + testOrderID + "/records"
+	txt := libdns.TXT{Name: "_acme-challenge", Text: "token"}
+	a := libdns.Address{Name: "www", IP: netip.MustParseAddr("192.0.2.1")}
+	soa := libdns.RR{Name: "@", Type: "SOA"}
+
+	tests := []struct {
+		name    string
+		method  string
+		records []libdns.Record
+		want    []string
+	}{
+		{"get", "get", nil, []string{records}},
+		{"append", "append", []libdns.Record{txt, txt}, []string{records + "/txt"}},
+		{"append several types", "append", []libdns.Record{txt, a}, []string{records + "/txt", records + "/a"}},
+		{"append nothing", "append", nil, nil},
+		{"set", "set", []libdns.Record{txt}, []string{records + "/txt"}},
+		{"set several types", "set", []libdns.Record{a, txt, a}, []string{records + "/a", records + "/txt"}},
+		{"set nothing", "set", nil, nil},
+		{"delete", "delete", []libdns.Record{txt}, []string{records + "/txt"}},
+		{"delete several types", "delete", []libdns.Record{a, txt}, []string{records + "/a", records + "/txt"}},
+		{"delete any type", "delete", []libdns.Record{txt, libdns.RR{Name: "www"}}, []string{records}},
+		{"delete unwritable type", "delete", []libdns.Record{soa}, nil},
+		{"delete unwritable and writable types", "delete", []libdns.Record{soa, txt}, []string{records + "/txt"}},
+		{"delete nothing", "delete", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			p, api := newTestProvider(t, txtSet("_acme-challenge.example.com.", 600, "token"))
+			var err error
+			switch tt.method {
+			case "get":
+				_, err = p.GetRecords(ctx, testZone)
+			case "append":
+				_, err = p.AppendRecords(ctx, testZone, tt.records)
+			case "set":
+				_, err = p.SetRecords(ctx, testZone, tt.records)
+			case "delete":
+				_, err = p.DeleteRecords(ctx, testZone, tt.records)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(api.reads, tt.want) {
+				t.Errorf("listed %q, want %q", api.reads, tt.want)
+			}
+		})
 	}
 }
 

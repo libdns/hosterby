@@ -281,13 +281,17 @@ func (p *Provider) lookupOrder(ctx context.Context, zone string) (dnsOrder, erro
 	return o, nil
 }
 
-// listRRsets returns the record sets of the order, with names in lower-case
-// ASCII.
-func (p *Provider) listRRsets(ctx context.Context, o dnsOrder) ([]rrset, error) {
+// listRRsets returns the record sets of the given type, or of all types if typ
+// is empty, with names in lower-case ASCII.
+func (p *Provider) listRRsets(ctx context.Context, o dnsOrder, typ string) ([]rrset, error) {
 	var payload struct {
 		Records []rrset `json:"records"`
 	}
-	if err := p.call(ctx, http.MethodGet, recordsPath(o), nil, &payload); err != nil {
+	path := recordsPath(o)
+	if typ != "" {
+		path += "/" + strings.ToLower(typ)
+	}
+	if err := p.call(ctx, http.MethodGet, path, nil, &payload); err != nil {
 		return nil, err
 	}
 	for i := range payload.Records {

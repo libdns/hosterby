@@ -14,7 +14,7 @@ hoster.by offers two kinds of keys:
 - *Temporary* keys expire after at most six months and have to be regenerated before that.
 - *Permanent* keys don't expire, but only work from a single static IPv4 address.
 
-The keys need access to the DNS hosting service: listing the services, and listing, adding, changing and deleting the records of the types you intend to manage. For ACME DNS challenges, the TXT record permissions are sufficient.
+The keys need access to the DNS hosting service: listing the services, and listing, adding, changing and deleting the records of the types you intend to manage. `GetRecords` and deleting records without a type also need the permission to list all records. For ACME DNS challenges, the TXT record permissions are sufficient.
 
 The zone must be a domain with the hoster.by DNS hosting service on the same account.
 

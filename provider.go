@@ -7,6 +7,11 @@
 // be issued in the hoster.by control panel. Short-lived access tokens are
 // created from them and renewed automatically.
 //
+// Appending, setting and deleting records lists only the records of their
+// types, so the keys need permissions for these types only. [Provider.GetRecords]
+// and deleting records without a type list all records, which needs a
+// separate permission.
+//
 // # Record sets
 //
 // The API manages record sets (RRsets): all records of the same name and type
@@ -75,7 +80,7 @@ type Provider struct {
 // GetRecords lists all the records in the zone.
 func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record, error) {
 	zone = normalizeZone(zone)
-	_, sets, err := p.zone(ctx, zone)
+	_, sets, err := p.zone(ctx, zone, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +106,7 @@ func (p *Provider) GetRecords(ctx context.Context, zone string) ([]libdns.Record
 func (p *Provider) AppendRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	zone = normalizeZone(zone)
 	inputs, err := prepare(zone, records)
-	if err != nil {
+	if err != nil || len(inputs) == 0 {
 		return nil, err
 	}
 
@@ -111,7 +116,7 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 	}
 	defer unlock()
 
-	order, sets, err := p.zone(ctx, zone)
+	order, sets, err := p.zone(ctx, zone, inputTypes(inputs))
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +175,7 @@ func (p *Provider) AppendRecords(ctx context.Context, zone string, records []lib
 func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	zone = normalizeZone(zone)
 	inputs, err := prepare(zone, records)
-	if err != nil {
+	if err != nil || len(inputs) == 0 {
 		return nil, err
 	}
 
@@ -204,7 +209,7 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 	}
 	defer unlock()
 
-	order, sets, err := p.zone(ctx, zone)
+	order, sets, err := p.zone(ctx, zone, inputTypes(inputs))
 	if err != nil {
 		return nil, err
 	}
@@ -226,13 +231,28 @@ func (p *Provider) SetRecords(ctx context.Context, zone string, records []libdns
 
 // DeleteRecords deletes matching records from the zone and returns them. An
 // empty type, TTL or data matches any value. TTLs are clamped to the API range
-// before comparison.
+// before comparison. Records of types that can't be written are not deleted.
 func (p *Provider) DeleteRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
 	zone = normalizeZone(zone)
+	var (
+		types   []string
+		anyType bool
+	)
 	for _, r := range records {
-		if r.RR().Name == "" {
+		rr := r.RR()
+		switch {
+		case rr.Name == "":
 			return nil, errNoName
+		case rr.Type == "":
+			anyType = true
+		case writableTypes[rr.Type] && !slices.Contains(types, rr.Type):
+			types = append(types, rr.Type)
 		}
+	}
+	if anyType {
+		types = nil // list all types
+	} else if len(types) == 0 {
+		return nil, nil // records of other types can't be written, so neither deleted
 	}
 
 	unlock, err := p.lock(ctx)
@@ -241,7 +261,7 @@ func (p *Provider) DeleteRecords(ctx context.Context, zone string, records []lib
 	}
 	defer unlock()
 
-	order, sets, err := p.zone(ctx, zone)
+	order, sets, err := p.zone(ctx, zone, types)
 	if err != nil {
 		return nil, err
 	}
@@ -316,15 +336,24 @@ func (p *Provider) ListZones(ctx context.Context) ([]libdns.Zone, error) {
 	return zones, nil
 }
 
-// zone returns the order and the record sets of the normalized zone.
-func (p *Provider) zone(ctx context.Context, zone string) (dnsOrder, []rrset, error) {
+// zone returns the order and the record sets of the normalized zone. If types
+// is nil, record sets of all types are listed. Otherwise only those of the given
+// types are, which needs fewer API permissions.
+func (p *Provider) zone(ctx context.Context, zone string, types []string) (dnsOrder, []rrset, error) {
 	order, err := p.lookupOrder(ctx, zone)
 	if err != nil {
 		return dnsOrder{}, nil, fmt.Errorf("hosterby: %w", err)
 	}
-	sets, err := p.listRRsets(ctx, order)
-	if err != nil {
-		return dnsOrder{}, nil, fmt.Errorf("hosterby: listing records of %q: %w", zone, err)
+	if types == nil {
+		types = []string{""}
+	}
+	var sets []rrset
+	for _, typ := range types {
+		s, err := p.listRRsets(ctx, order, typ)
+		if err != nil {
+			return dnsOrder{}, nil, fmt.Errorf("hosterby: listing records of %q: %w", zone, err)
+		}
+		sets = append(sets, s...)
 	}
 	return order, sets, nil
 }
@@ -382,6 +411,17 @@ func prepare(zone string, records []libdns.Record) ([]input, error) {
 		})
 	}
 	return inputs, nil
+}
+
+// inputTypes returns the distinct record types of inputs.
+func inputTypes(inputs []input) []string {
+	var types []string
+	for _, in := range inputs {
+		if !slices.Contains(types, in.key.typ) {
+			types = append(types, in.key.typ)
+		}
+	}
+	return types
 }
 
 func indexRRsets(sets []rrset) map[setKey]*rrset {

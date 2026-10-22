@@ -259,4 +259,27 @@ func TestIntegration(t *testing.T) {
 			expect(t, name, tt.typ)
 		})
 	}
+
+	t.Run("DeleteAnyType", func(t *testing.T) {
+		name := "any." + base
+		records := []libdns.Record{
+			libdns.Address{Name: name, TTL: ttl, IP: netip.MustParseAddr("192.0.2.1")},
+			libdns.TXT{Name: name, TTL: ttl, Text: "any"},
+		}
+		if _, err := p.AppendRecords(ctx, zone, records); err != nil {
+			t.Fatalf("AppendRecords: %v", err)
+		}
+		expect(t, name, "A", records[0])
+		expect(t, name, "TXT", records[1])
+
+		deleted, err := p.DeleteRecords(ctx, zone, []libdns.Record{libdns.RR{Name: name}})
+		if err != nil {
+			t.Fatalf("DeleteRecords: %v", err)
+		}
+		if len(deleted) != 2 {
+			t.Fatalf("DeleteRecords returned %v, want 2 records", deleted)
+		}
+		expect(t, name, "A")
+		expect(t, name, "TXT")
+	})
 }
